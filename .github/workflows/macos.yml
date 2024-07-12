@@ -1,0 +1,139 @@
+# Part of the webThread Project (https://github.com/cpp4ever/webthread), under the MIT License
+# SPDX-License-Identifier: MIT
+#
+# Copyright (c) 2024 Mikhail Smirnov
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+name: macOS
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: "${{matrix.os}} ${{matrix.compiler}} ${{matrix.build_type}} ${{matrix.feature}}"
+    runs-on: ${{matrix.os}}
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+        compiler: [clang, gcc]
+        feature: [AddressSanitizer, CodeCoverage, ThreadSanitizer, UndefinedBehaviorSanitizer]
+        os: [macos-12, macos-13, macos-14]
+        include:
+          - feature: AddressSanitizer
+            cmake_extra_args: -DSANITIZER=ASan
+          - feature: CodeCoverage
+            cmake_extra_args: -DENABLE_COVERAGE=ON
+          - feature: ThreadSanitizer
+            cmake_extra_args: -DSANITIZER=TSan
+          - feature: UndefinedBehaviorSanitizer
+            cmake_extra_args: -DSANITIZER=UBSan
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+            standard-libraries:
+          - os: macos-12
+            compiler: gcc
+            cc: gcc-12
+            cxx: g++-12
+          - os: macos-13
+            compiler: gcc
+            cc: gcc-13
+            cxx: g++-13
+          - os: macos-14
+            compiler: gcc
+            cc: gcc-14
+            cxx: g++-14
+            standard-libraries: -DCMAKE_CXX_STANDARD_LIBRARIES="-Wl,-ld_classic" # Use classic linker
+        exclude:
+          - build_type: Release
+            feature: CodeCoverage # Makes no sense for the Release build
+          - compiler: gcc
+            feature: ThreadSanitizer # Not supported
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+
+    - name: Install
+      run: |
+        brew install cmake ninja openssl
+        pipx install git+https://github.com/gcovr/gcovr.git@7.2#egg=gcovr
+        ${{matrix.cc}} --version
+        ${{matrix.cxx}} --version
+        cmake --version
+        gcovr --version
+        ninja --version
+        cmake -E make_directory ${{runner.workspace}}/build
+
+    - name: Configure
+      working-directory: ${{runner.workspace}}/build
+      run: |
+        echo "CC=${{matrix.cc}}" >> $GITHUB_ENV
+        echo "CMAKE_BUILD_PARALLEL_LEVEL=$(sysctl -n hw.logicalcpu)" >> $GITHUB_ENV
+        echo "CTEST_OUTPUT_ON_FAILURE=1" >> $GITHUB_ENV
+        echo "CXX=${{matrix.cxx}}" >> $GITHUB_ENV
+        echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl)" >> $GITHUB_ENV
+        echo "SOURCE_DATE_EPOCH=$(git -C ${{github.workspace}} show -s --format=%ct ${{github.sha}})" >> $GITHUB_ENV
+        echo "UBSAN_OPTIONS=silence_unsigned_overflow=1" >> $GITHUB_ENV
+        cmake -DCMAKE_BUILD_TYPE=${{matrix.build_type}} ${{matrix.cmake_extra_args}} ${{matrix.standard-libraries}} -G "Ninja" -S ${{github.workspace}}
+
+    - name: Build
+      working-directory: ${{runner.workspace}}/build
+      run: |
+        cmake --build . --config ${{matrix.build_type}} --target tests
+
+    - name: Test
+      working-directory: ${{runner.workspace}}/build
+      run: |
+        ctest --build-config ${{matrix.build_type}} --output-on-failure --repeat until-pass:5
+
+    - name: Coverage
+      if: ${{matrix.feature == 'CodeCoverage'}}
+      working-directory: ${{runner.workspace}}/build
+      run: |
+        cmake --build . --config ${{matrix.build_type}} --target gcov
+        gcovr \
+          --cobertura ${{runner.workspace}}/build/coverage.xml \
+          --filter ${{github.workspace}}/include/ \
+          --filter ${{github.workspace}}/src/ \
+          --gcov-filter ${{runner.workspace}}/build/ \
+          --gcov-object-directory ${{runner.workspace}}/build/ \
+          --gcov-use-existing-files \
+          --print-summary \
+          --root ${{github.workspace}} \
+          --timestamp ${{env.SOURCE_DATE_EPOCH}}
+
+    - name: Upload coverage reports to Codecov
+      if: ${{matrix.feature == 'CodeCoverage'}}
+      uses: codecov/codecov-action@v4
+      with:
+        directory: ${{runner.workspace}}/build
+        fail_ci_if_error: true
+        files: coverage.xml
+        flags: unittests
+        root_dir: ${{github.workspace}}
+        token: ${{secrets.CODECOV_TOKEN}}
+        verbose: true
+        working-directory: ${{github.workspace}}
