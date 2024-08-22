@@ -25,7 +25,7 @@
 
 #pragma once
 
-#include "test_common.hpp" ///< for test_bad_request_timeout, test_good_request_timeout, test_loopback_ip, test_non_routable_ips, test_wait
+#include "test_common.hpp" ///< for test_bad_request_timeout, test_good_request_timeout, test_loopback_ip, test_non_routable_ips
 #include "test_rest_client_listener.hpp" ///< for EXPECT_HTTP_RESPONSE, test_rest_client_listener
 #include "test_rest_server.hpp" ///< for EXPECT_HTTP_REQUEST, test_rest_server
 
@@ -42,8 +42,8 @@
 #include <gmock/gmock.h> ///< for EXPECT_CALL, EXPECT_THAT, testing::AnyOf, testing::Return, testing::StrictMock, testing::_
 #include <gtest/gtest.h> ///< for EXPECT_TRUE
 
-#include <atomic> ///< for std::atomic_bool, std::memory_order_release
 #include <cstddef> ///< for size_t
+#include <future> ///< for std::future_status, std::promise
 #include <map> ///< for std::map
 #include <memory> ///< for std::make_shared
 #include <string> ///< for std::string, std::to_string
@@ -68,17 +68,18 @@ void test_rest_client()
    /// Connect timeout
    for (auto const testNonRoutableIp : test_non_routable_ips)
    {
-      auto testLock = std::atomic_bool{false};
       auto testRestClientListener = std::make_shared<testing::StrictMock<test_rest_client_listener>>();
+      auto testPromise = std::promise<void>{};
+      auto const testFuture = testPromise.get_future();
       EXPECT_CALL(*testRestClientListener, on_error(testing::_, testing::_))
          .WillOnce(
-            [&] (auto const testErrorCode, auto const testErrorDescription)
+            [testNonRoutableIp, &testPromise] (auto const testErrorCode, auto const testErrorDescription)
             {
                EXPECT_THAT(testErrorCode, testing::AnyOf(CURLE_COULDNT_RESOLVE_HOST, CURLE_OPERATION_TIMEDOUT))
                   << testNonRoutableIp
                   << ": " << testErrorDescription
                ;
-               testLock.store(true, std::memory_order_release);
+               testPromise.set_value();
             }
          )
       ;
@@ -89,7 +90,7 @@ void test_rest_client()
          .with_timeout(test_bad_request_timeout)
          .perform()
       ;
-      EXPECT_TRUE(test_wait(testLock, test_bad_request_timeout)) << testNonRoutableIp;
+      EXPECT_EQ(std::future_status::ready, testFuture.wait_for(test_good_request_timeout)) << testNonRoutableIp;
    }
    auto const testAddress = boost::asio::ip::make_address(test_loopback_ip);
    testing::StrictMock<test_rest_server<test_rest_stream>> testRestServer{testAddress};
@@ -100,14 +101,15 @@ void test_rest_client()
    /// Disconnect on socket accept
    {
       EXPECT_CALL(testRestServer, should_accept_socket()).WillOnce(testing::Return(false));
-      auto testLock = std::atomic_bool{false};
       auto testRestClientListener = std::make_shared<testing::StrictMock<test_rest_client_listener>>();
+      auto testPromise = std::promise<void>{};
+      auto const testFuture = testPromise.get_future();
       EXPECT_CALL(*testRestClientListener, on_error(testing::_, testing::_))
          .WillOnce(
-            [&] (auto const testErrorCode, auto const testErrorDescription)
+            [&testPromise, &testErrorCodeMatcher] (auto const testErrorCode, auto const testErrorDescription)
             {
                EXPECT_THAT(testErrorCode, testErrorCodeMatcher) << testErrorDescription;
-               testLock.store(true, std::memory_order_release);
+               testPromise.set_value();
             }
          )
       ;
@@ -117,20 +119,21 @@ void test_rest_client()
          .with_timeout(test_good_request_timeout)
          .perform()
       ;
-      EXPECT_TRUE(test_wait(testLock, test_good_request_timeout));
+      EXPECT_EQ(std::future_status::ready, testFuture.wait_for(test_good_request_timeout));
    }
    /// Disconnect on handshake
    {
       EXPECT_CALL(testRestServer, should_accept_socket()).WillOnce(testing::Return(true));
       EXPECT_CALL(testRestServer, should_pass_handshake()).WillOnce(testing::Return(false));
-      auto testLock = std::atomic_bool{false};
       auto testRestClientListener = std::make_shared<testing::StrictMock<test_rest_client_listener>>();
+      auto testPromise = std::promise<void>{};
+      auto const testFuture = testPromise.get_future();
       EXPECT_CALL(*testRestClientListener, on_error(testing::_, testing::_))
          .WillOnce(
-            [&] (auto const testErrorCode, auto const testErrorDescription)
+            [&testPromise, &testErrorCodeMatcher] (auto const testErrorCode, auto const testErrorDescription)
             {
                EXPECT_THAT(testErrorCode, testErrorCodeMatcher) << testErrorDescription;
-               testLock.store(true, std::memory_order_release);
+               testPromise.set_value();
             }
          )
       ;
@@ -140,7 +143,7 @@ void test_rest_client()
          .with_timeout(test_good_request_timeout)
          .perform()
       ;
-      EXPECT_TRUE(test_wait(testLock, test_good_request_timeout));
+      EXPECT_EQ(std::future_status::ready, testFuture.wait_for(test_good_request_timeout));
    }
    /// Disconnect on request
    {
@@ -160,14 +163,15 @@ void test_rest_client()
             }
          )
       ;
-      auto testLock = std::atomic_bool{false};
       auto testRestClientListener = std::make_shared<testing::StrictMock<test_rest_client_listener>>();
+      auto testPromise = std::promise<void>{};
+      auto const testFuture = testPromise.get_future();
       EXPECT_CALL(*testRestClientListener, on_error(testing::_, testing::_))
          .WillOnce(
-            [&] (auto const testErrorCode, auto const testErrorDescription)
+            [&testPromise, &testErrorCodeMatcher] (auto const testErrorCode, auto const testErrorDescription)
             {
                EXPECT_THAT(testErrorCode, testErrorCodeMatcher) << testErrorDescription;
-               testLock.store(true, std::memory_order_release);
+               testPromise.set_value();
             }
          )
       ;
@@ -177,7 +181,7 @@ void test_rest_client()
          .with_timeout(test_good_request_timeout)
          .perform()
       ;
-      EXPECT_TRUE(test_wait(testLock, test_good_request_timeout));
+      EXPECT_EQ(std::future_status::ready, testFuture.wait_for(test_good_request_timeout));
    }
    /// Do not keep alive
    {
@@ -232,21 +236,28 @@ void test_rest_client()
             }
          )
       ;
+      auto testPromise = std::promise<void>{};
+      auto const testFuture = testPromise.get_future();
       auto testRestClient = web::rest_client{testThread, testRestClientListener, testConfig};
-      auto testLock = std::atomic_bool{false};
       EXPECT_CALL(*testRestClientListener, on_response_complete(testing::_))
          .WillOnce(
-            [&] (auto const &testResponseStatusCode)
+            [
+               &testRestServer,
+               &testRestClientListener,
+               &testPromise,
+               &testRestClient,
+               &testErrorCodeMatcher
+            ] (auto const &testResponseStatusCode)
             {
                EXPECT_EQ(testResponseStatusCode, 200);
 
                EXPECT_CALL(testRestServer, should_accept_socket()).WillOnce(testing::Return(false));
                EXPECT_CALL(*testRestClientListener, on_error(testing::_, testing::_))
                   .WillOnce(
-                     [&] (auto const testErrorCode, auto const testErrorDescription)
+                     [&testPromise, &testErrorCodeMatcher] (auto const testErrorCode, auto const testErrorDescription)
                      {
                         EXPECT_THAT(testErrorCode, testErrorCodeMatcher) << testErrorDescription;
-                        testLock.store(true, std::memory_order_release);
+                        testPromise.set_value();
                      }
                   )
                ;
@@ -264,15 +275,16 @@ void test_rest_client()
          .with_path("/")
          .perform()
       ;
-      EXPECT_TRUE(test_wait(testLock, test_good_request_timeout));
+      EXPECT_EQ(std::future_status::ready, testFuture.wait_for(test_good_request_timeout));
       EXPECT_TRUE(testHeaders.empty());
    }
    /// CRUD
    {
       EXPECT_CALL(testRestServer, should_accept_socket()).WillOnce(testing::Return(true));
       EXPECT_CALL(testRestServer, should_pass_handshake()).WillOnce(testing::Return(true));
-      auto testLock = std::atomic_bool{false};
       auto testRestClientListener = std::make_shared<testing::StrictMock<test_rest_client_listener>>();
+      auto testPromise = std::promise<void>{};
+      auto const testFuture = testPromise.get_future();
       auto testRestClient = web::rest_client{testThread, testRestClientListener, testConfig};
       auto const testInternalCleanupCheck = [&] ()
       {
@@ -317,11 +329,11 @@ void test_rest_client()
          );
          EXPECT_CALL(*testRestClientListener, on_response_complete(testing::_))
             .WillOnce(
-               [testHeaders, &testLock] (auto const &testResponseStatusCode)
+               [testHeaders, &testPromise] (auto const &testResponseStatusCode)
                {
                   EXPECT_EQ(testResponseStatusCode, 200);
 
-                  testLock.store(true, std::memory_order_release);
+                  testPromise.set_value();
                   EXPECT_TRUE(testHeaders->empty());
                }
             )
@@ -670,6 +682,6 @@ void test_rest_client()
          ;
       };
       testCreateRequest();
-      EXPECT_TRUE(test_wait(testLock, test_good_request_timeout));
+      EXPECT_EQ(std::future_status::ready, testFuture.wait_for(test_good_request_timeout));
    }
 }

@@ -25,7 +25,7 @@
 
 #pragma once
 
-#include "webthread/constants.hpp" ///< for web::default_keep_alive_delay, web::default_request_timeout
+#include "webthread/constants.hpp" ///< for web::default_connect_timeout, web::default_keep_alive_delay, web::default_tick_timeout
 #include "webthread/net_interface.hpp" ///< for web::net_interface
 #include "webthread/peer_address.hpp" ///< for web::peer_address
 
@@ -53,6 +53,11 @@ public:
    ws_config &operator = (ws_config &&) = delete;
    ws_config &operator = (ws_config const &) = delete;
 
+   [[maybe_unused, nodiscard]] constexpr std::chrono::milliseconds connect_timeout() const noexcept
+   {
+      return m_connectTimeout;
+   }
+
    [[maybe_unused, nodiscard]] constexpr std::chrono::seconds keep_alive_delay() const noexcept
    {
       return m_keepAliveDelay;
@@ -68,14 +73,21 @@ public:
       return m_address;
    }
 
-   [[maybe_unused, nodiscard]] constexpr std::chrono::milliseconds timeout() const noexcept
+   [[maybe_unused, nodiscard]] constexpr std::chrono::milliseconds tick_timeout() const noexcept
    {
-      return m_timeout;
+      return m_tickTimeout;
    }
 
    [[maybe_unused, nodiscard]] constexpr std::string_view const &url_path() const noexcept
    {
       return m_urlPath;
+   }
+
+   [[maybe_unused]] constexpr ws_config &with_connect_timeout(std::chrono::milliseconds const connectTimeout) noexcept
+   {
+      assert(std::chrono::milliseconds::zero() < connectTimeout);
+      m_connectTimeout = connectTimeout;
+      return *this;
    }
 
    [[maybe_unused]] constexpr ws_config &with_interface(
@@ -97,10 +109,10 @@ public:
       return *this;
    }
 
-   [[maybe_unused]] constexpr ws_config &with_timeout(std::chrono::milliseconds const timeout) noexcept
+   [[maybe_unused]] constexpr ws_config &with_tick_timeout(std::chrono::milliseconds const tickTimeout) noexcept
    {
-      assert(std::chrono::milliseconds::zero() < timeout);
-      m_timeout = timeout;
+      assert(std::chrono::milliseconds::zero() < tickTimeout);
+      m_tickTimeout = tickTimeout;
       return *this;
    }
 
@@ -115,7 +127,8 @@ private:
    web::peer_address m_address;
    web::net_interface m_interface = {.name = default_interface, .host = default_interface};
    std::chrono::seconds m_keepAliveDelay = default_keep_alive_delay;
-   std::chrono::milliseconds m_timeout = default_request_timeout;
+   std::chrono::milliseconds m_connectTimeout = default_connect_timeout;
+   std::chrono::milliseconds m_tickTimeout = default_tick_timeout;
    std::string_view m_urlPath = {};
 };
 

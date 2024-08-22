@@ -28,11 +28,9 @@
 #include <gtest/gtest.h> ///< for EXPECT_FALSE
 
 #include <array> ///< for std::to_array
-#include <atomic> ///< for std::atomic_bool, std::memory_order_acquire, std::memory_order_relaxed
-#include <chrono> ///< for std::chrono::milliseconds, std::chrono::seconds, std::chrono::system_clock
+#include <chrono> ///< for std::chrono::milliseconds, std::chrono::seconds
 #include <cstdint> ///< for uint16_t
 #include <string_view> ///< for std::string_view
-#include <thread> ///< for std::this_thread
 
 constexpr uint16_t test_cpu_id = 0;
 constexpr auto test_non_routable_ips = std::to_array<std::string_view>({
@@ -55,21 +53,6 @@ constexpr uint16_t test_peer_ssl_port = 444;
 constexpr auto test_keep_alive_delay = std::chrono::seconds{1};
 constexpr auto test_bad_request_timeout = std::chrono::milliseconds{100};
 constexpr auto test_good_request_timeout = std::chrono::seconds{1};
-
-[[nodiscard]] inline bool test_wait(std::atomic_bool const &testGuard, std::chrono::milliseconds const timeout)
-{
-   constexpr auto testExtraWaitTime = std::chrono::seconds{1};
-   auto const testExpirationTime = std::chrono::system_clock::now() + timeout + testExtraWaitTime;
-   while (
-      (false == testGuard.load(std::memory_order_relaxed)) &&
-      (std::chrono::system_clock::now() <= testExpirationTime)
-   )
-   {
-      std::this_thread::sleep_for(std::chrono::milliseconds{10});
-   }
-   std::this_thread::sleep_for(std::chrono::milliseconds{10});
-   return testGuard.load(std::memory_order_acquire);
-}
 
 #define EXPECT_ERROR_CODE(testErrorCode)  \
    EXPECT_FALSE(testErrorCode.failed())   \

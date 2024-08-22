@@ -44,6 +44,7 @@
 #include <algorithm> ///< for std::find
 #include <atomic> ///< for ATOMIC_FLAG_INIT, std::atomic_bool, std::atomic_flag
 #include <cassert> ///< for assert
+#include <chrono> ///< for std::chrono::milliseconds, std::chrono::seconds, std::chrono::system_clock
 #include <cstddef> ///< for size_t
 #include <cstdint> ///< for intptr_t, uint16_t
 #include <cstring> ///< for std::memcpy
@@ -60,11 +61,152 @@
 #  include <strings.h> ///< for strncasecmp
 #endif
 #include <thread> ///< for std::jthread, std::thread
+#include <variant> ///< for std::get, std::variant
 #include <vector> ///< for std::begin, std::end, std::erase, std::vector
-#include <utility> ///< for std::pair
+#include <utility> ///< for std::pair, std::swap
 
 namespace web
 {
+
+class [[nodiscard("discarded-value expression detected")]] thread::timer_queue final
+{
+private:
+   struct [[nodiscard("discarded-value expression detected")]] timer_task final
+   {
+      timer_task *next = nullptr;
+      std::chrono::system_clock::time_point expirationTime = {};
+      thread::connection *connection = nullptr;
+   };
+
+public:
+   timer_queue() = delete;
+
+   [[nodiscard]] timer_queue(timer_queue &&rhs) noexcept
+   {
+      std::swap(m_priorityTaskList, rhs.m_priorityTaskList);
+      std::swap(m_freeTaskList, rhs.m_freeTaskList);
+      m_allTasks.swap(rhs.m_allTasks);
+   }
+
+   timer_queue(timer_queue const &) = delete;
+
+   [[nodiscard]] explicit timer_queue(size_t const initialCapacity)
+   {
+      for (size_t taskIndex = 0; taskIndex < initialCapacity; ++taskIndex)
+      {
+         auto &task = m_allTasks.emplace_back();
+         task.next = m_freeTaskList;
+         m_freeTaskList = std::addressof(task);
+      }
+   }
+
+   ~timer_queue()
+   {
+      assert(nullptr == m_priorityTaskList);
+      [[maybe_unused]] size_t tasksCount = 0;
+      while (nullptr != m_freeTaskList)
+      {
+         auto *task = m_freeTaskList;
+         m_freeTaskList = task->next;
+         task->next = nullptr;
+         ++tasksCount;
+      }
+      assert(m_allTasks.size() == tasksCount);
+   }
+
+   timer_queue &operator = (timer_queue &&) = delete;
+   timer_queue &operator = (timer_queue const &) = delete;
+
+   [[nodiscard]] thread::connection *pop(std::chrono::system_clock::time_point const time)
+   {
+      if ((nullptr != m_priorityTaskList) && (time >= m_priorityTaskList->expirationTime))
+      {
+         auto *task = m_priorityTaskList;
+         assert(nullptr != task->connection);
+         assert((nullptr == task->next) || (task->expirationTime <= task->next->expirationTime));
+         m_priorityTaskList = task->next;
+         auto *connection = task->connection;
+         task->next = m_freeTaskList;
+         task->connection = nullptr;
+         task->expirationTime = {};
+         m_freeTaskList = task;
+         return connection;
+      }
+      return nullptr;
+   }
+
+   void push(std::chrono::system_clock::time_point const expirationTime, thread::connection &connection)
+   {
+      timer_task *lastPriorityTask = nullptr;
+      for (auto *priorityTask = m_priorityTaskList; nullptr != priorityTask; priorityTask = priorityTask->next)
+      {
+         if (expirationTime < priorityTask->expirationTime)
+         {
+            break;
+         }
+         lastPriorityTask = priorityTask;
+      }
+      auto &task = free_task();
+      assert(nullptr == task.next);
+      assert(std::chrono::system_clock::time_point{} == task.expirationTime);
+      assert(nullptr == task.connection);
+      task.expirationTime = expirationTime;
+      task.connection = std::addressof(connection);
+      if (nullptr == lastPriorityTask)
+      {
+         task.next = m_priorityTaskList;
+         m_priorityTaskList = std::addressof(task);
+      }
+      else
+      {
+         task.next = lastPriorityTask->next;
+         lastPriorityTask->next = std::addressof(task);
+      }
+   }
+
+   void remove(thread::connection &connection)
+   {
+      timer_task *lastPriorityTask = nullptr;
+      for (auto *priorityTask = m_priorityTaskList; nullptr != priorityTask; priorityTask = priorityTask->next)
+      {
+         if (priorityTask->connection == std::addressof(connection))
+         {
+            if (nullptr == lastPriorityTask)
+            {
+               assert(priorityTask == m_priorityTaskList);
+               m_priorityTaskList = m_priorityTaskList->next;
+            }
+            else
+            {
+               lastPriorityTask->next = priorityTask->next;
+            }
+            priorityTask->next = m_freeTaskList;
+            priorityTask->expirationTime = {};
+            priorityTask->connection = nullptr;
+            m_freeTaskList = priorityTask;
+            break;
+         }
+         lastPriorityTask = priorityTask;
+      }
+   }
+
+private:
+   timer_task *m_priorityTaskList = nullptr;
+   timer_task *m_freeTaskList = nullptr;
+   std::deque<timer_task> m_allTasks = {};
+
+   [[nodiscard]] timer_task &free_task()
+   {
+      if (nullptr == m_freeTaskList)
+      {
+         return m_allTasks.emplace_back();
+      }
+      auto *task = m_freeTaskList;
+      m_freeTaskList = task->next;
+      task->next = nullptr;
+      return *task;
+   }
+};
 
 namespace
 {
@@ -133,8 +275,6 @@ void set_thread_affinity([[maybe_unused]] uint16_t const cpuId) noexcept
 #endif
 }
 
-}
-
 class [[nodiscard("discarded-value expression detected")]] global_context
 {
 public:
@@ -156,9 +296,6 @@ public:
    global_context &operator = (global_context &&) = delete;
 };
 
-namespace
-{
-
 enum class connection_status : uint8_t
 {
    initializing,
@@ -167,46 +304,44 @@ enum class connection_status : uint8_t
    inactive,
 };
 
-union [[nodiscard("discarded-value expression detected")]] socket_event
+struct [[nodiscard("discarded-value expression detected")]] socket_event
 {
-   event ev = {};
-   socket_event *next;
+   std::variant<event, socket_event *> eventOrNext;
 };
 
-struct [[nodiscard("discarded-value expression detected")]] socket_context final
+struct [[nodiscard("discarded-value expression detected")]] event_context final
 {
    event_base &eventBase;
    CURLM *multiHandle = nullptr;
    socket_event *freeSocketEvents = nullptr;
+   thread::timer_queue timerQueue;
    std::deque<socket_event> allSocketEvents = {};
 };
 
-[[nodiscard]] socket_event *acquire_socket_event(socket_context &socketContext)
+[[nodiscard]] socket_event *acquire_socket_event(event_context &eventContext)
 {
    socket_event *socketEvent;
-   if (nullptr != socketContext.freeSocketEvents) [[likely]]
+   if (nullptr != eventContext.freeSocketEvents) [[likely]]
    {
-      socketEvent = socketContext.freeSocketEvents;
-      socketContext.freeSocketEvents = socketEvent->next;
-      socketEvent->next = nullptr;
+      socketEvent = eventContext.freeSocketEvents;
+      eventContext.freeSocketEvents = std::get<socket_event *>(socketEvent->eventOrNext);
    }
    else
    {
-      socketEvent = std::addressof(socketContext.allSocketEvents.emplace_back());
+      socketEvent = std::addressof(eventContext.allSocketEvents.emplace_back());
    }
-   socketEvent->ev = {};
-   socketEvent->ev.ev_base = nullptr;
+   socketEvent->eventOrNext = event{.ev_base = nullptr};
    return socketEvent;
 }
 
-void release_socket_event(socket_context &socketContext, socket_event &socketEvent)
+void release_socket_event(event_context &eventContext, socket_event &socketEvent)
 {
-   if (nullptr != socketEvent.ev.ev_base)
+   if (nullptr != std::get<event>(socketEvent.eventOrNext).ev_base)
    {
-      EXPECT_ERROR_CODE(0, event_del(std::addressof(socketEvent.ev)));
+      EXPECT_ERROR_CODE(0, event_del(std::addressof(std::get<event>(socketEvent.eventOrNext))));
    }
-   socketEvent.next = socketContext.freeSocketEvents;
-   socketContext.freeSocketEvents = std::addressof(socketEvent);
+   socketEvent.eventOrNext = eventContext.freeSocketEvents;
+   eventContext.freeSocketEvents = std::addressof(socketEvent);
 }
 
 }
@@ -222,17 +357,18 @@ public:
    connection &operator = (connection &&) = delete;
    connection &operator = (connection const &) = delete;
 
-   virtual void register_handle(socket_context &socketContext) = 0;
-   virtual void send_message(socket_context &socketContext) = 0;
-   virtual void unregister_handle(socket_context &socketContext) = 0;
+   virtual void register_handle(event_context &eventContext) = 0;
+   virtual void send_message(event_context &eventContext) = 0;
+   virtual void tick(event_context &eventContext) = 0;
+   virtual void unregister_handle(event_context &eventContext) = 0;
 
    static int curl_socket_callback(CURL *handle, curl_socket_t const socket, int const socketAction, void *callbackUserdata, void *socketUserdata)
    {
       assert(nullptr != handle);
       assert(0 != socket);
       assert(nullptr != callbackUserdata);
-      auto &socketContext = *static_cast<socket_context *>(callbackUserdata);
-      assert(nullptr != socketContext.multiHandle);
+      auto &eventContext = *static_cast<event_context *>(callbackUserdata);
+      assert(nullptr != eventContext.multiHandle);
       auto *socketEvent = static_cast<socket_event *>(socketUserdata);
       switch (socketAction)
       {
@@ -242,8 +378,8 @@ public:
       {
          if (nullptr == socketEvent)
          {
-            socketEvent = acquire_socket_event(socketContext);
-            EXPECT_ERROR_CODE(CURLM_OK, curl_multi_assign(socketContext.multiHandle, socket, socketEvent));
+            socketEvent = acquire_socket_event(eventContext);
+            EXPECT_ERROR_CODE(CURLM_OK, curl_multi_assign(eventContext.multiHandle, socket, socketEvent));
             connection *self = nullptr;
             EXPECT_ERROR_CODE(CURLE_OK, curl_easy_getinfo(handle, CURLINFO_PRIVATE, std::addressof(self)));
             assert(nullptr != self);
@@ -251,7 +387,7 @@ public:
          }
          else
          {
-            EXPECT_ERROR_CODE(0, event_del(std::addressof(socketEvent->ev)));
+            EXPECT_ERROR_CODE(0, event_del(std::addressof(std::get<event>(socketEvent->eventOrNext))));
          }
          short socketEventKind =
             ((socketAction & CURL_POLL_IN) ? EV_READ : 0) |
@@ -261,15 +397,15 @@ public:
          EXPECT_ERROR_CODE(
             0,
             event_assign(
-               std::addressof(socketEvent->ev),
-               std::addressof(socketContext.eventBase),
+               std::addressof(std::get<event>(socketEvent->eventOrNext)),
+               std::addressof(eventContext.eventBase),
                socket,
                socketEventKind,
                &connection::event_socket_callback,
-               std::addressof(socketContext)
+               std::addressof(eventContext)
             )
          );
-         EXPECT_ERROR_CODE(0, event_add(std::addressof(socketEvent->ev), nullptr));
+         EXPECT_ERROR_CODE(0, event_add(std::addressof(std::get<event>(socketEvent->eventOrNext)), nullptr));
       }
       break;
 
@@ -280,13 +416,20 @@ public:
          EXPECT_ERROR_CODE(CURLE_OK, curl_easy_getinfo(handle, CURLINFO_PRIVATE, std::addressof(self)));
          assert(nullptr != self);
          self->on_detach_socket(socket);
-         EXPECT_ERROR_CODE(CURLM_OK, curl_multi_assign(socketContext.multiHandle, socket, nullptr));
-         release_socket_event(socketContext, *socketEvent);
+         EXPECT_ERROR_CODE(CURLM_OK, curl_multi_assign(eventContext.multiHandle, socket, nullptr));
+         release_socket_event(eventContext, *socketEvent);
          socketEvent = nullptr;
       }
       break;
 
-      default: std::abort();
+      default:
+      {
+#if (202202L <= __cpp_lib_unreachable)
+         std::unreachable();
+#else
+         std::abort();
+#endif
+      }
       }
       return 0;
    }
@@ -294,43 +437,43 @@ public:
    static void event_timer_callback(evutil_socket_t, short, void *userdata)
    {
       assert(nullptr != userdata);
-      auto *socketContext = static_cast<socket_context *>(userdata);
-      assert(nullptr != socketContext->multiHandle);
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_socket_action(socketContext->multiHandle, CURL_SOCKET_TIMEOUT, 0, nullptr));
-      process_data(*socketContext);
+      auto *eventContext = static_cast<event_context *>(userdata);
+      assert(nullptr != eventContext->multiHandle);
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_socket_action(eventContext->multiHandle, CURL_SOCKET_TIMEOUT, 0, nullptr));
+      process_data(*eventContext);
    }
 
 private:
    virtual void on_attach_socket(curl_socket_t socket) = 0;
    virtual void on_detach_socket(curl_socket_t socket) = 0;
-   virtual void on_recv_message(socket_context &socketContext, CURLMsg const &message) = 0;
+   virtual void on_recv_message(event_context &eventContext, CURLMsg const &message) = 0;
 
    static void event_socket_callback(evutil_socket_t socket, short const socketEventKind, void *userdata)
    {
       assert(nullptr != userdata);
-      auto *socketContext = static_cast<socket_context *>(userdata);
-      assert(nullptr != socketContext->multiHandle);
+      auto *eventContext = static_cast<event_context *>(userdata);
+      assert(nullptr != eventContext->multiHandle);
       int socketAction =
          ((socketEventKind & EV_READ) ? CURL_CSELECT_IN : 0) |
          ((socketEventKind & EV_WRITE) ? CURL_CSELECT_OUT : 0)
       ;
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_socket_action(socketContext->multiHandle, socket, socketAction, nullptr));
-      process_data(*socketContext);
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_socket_action(eventContext->multiHandle, socket, socketAction, nullptr));
+      process_data(*eventContext);
    }
 
-   static void process_data(socket_context &socketContext)
+   static void process_data(event_context &eventContext)
    {
-      assert(nullptr != socketContext.multiHandle);
+      assert(nullptr != eventContext.multiHandle);
       int messagesInQueue = 0;
       CURLMsg *message = nullptr;
-      while (nullptr != (message = curl_multi_info_read(socketContext.multiHandle, std::addressof(messagesInQueue))))
+      while (nullptr != (message = curl_multi_info_read(eventContext.multiHandle, std::addressof(messagesInQueue))))
       {
          assert(CURLMSG_DONE == message->msg);
          assert(nullptr != message->easy_handle);
          connection *self = nullptr;
          EXPECT_ERROR_CODE(CURLE_OK, curl_easy_getinfo(message->easy_handle, CURLINFO_PRIVATE, std::addressof(self)));
          assert(nullptr != self);
-         self->on_recv_message(socketContext, *message);
+         self->on_recv_message(eventContext, *message);
       }
       assert(0 == messagesInQueue);
    }
@@ -357,20 +500,20 @@ public:
    worker(worker &&) = delete;
    worker(worker const &) = delete;
 
-   [[nodiscard]] explicit worker(thread_config const config) :
-      m_config(config)
+   [[nodiscard]] explicit worker(thread_config const threadConfig)
    {
-      m_tasksQueue.reserve(config.initial_connections_capacity());
-      m_websocketBuffer = std::make_unique<char[]>(max_expected_inbound_message_size());
+      m_tasksQueue.reserve(threadConfig.initial_connections_capacity());
+      m_websocketBuffer.resize(threadConfig.max_expected_inbound_message_size());
 #if (201911L <= __cpp_lib_jthread)
       m_thread = std::make_unique<std::jthread>(
-         [this] (auto const stopToken)
+         [this] (auto const stopToken, thread_config const config)
          {
-            thread_handler(stopToken);
-         }
-     );
+            thread_handler(stopToken, config);
+         },
+         threadConfig
+      );
 #else
-      m_thread = std::make_unique<std::thread>(&worker::thread_handler, this);
+      m_thread = std::make_unique<std::thread>(&worker::thread_handler, this, threadConfig);
 #endif
       assert(nullptr != m_thread);
    }
@@ -430,16 +573,11 @@ public:
             std::end(m_tasksQueue),
             [&connection] (auto const &task)
             {
-               return (connection == task.connection) && (task_action::add != task.action);
+               return (connection == task.connection) && (task_action::send == task.action);
             }
          )
       );
       m_tasksQueue.emplace_back(task{.connection = connection, .action = task_action::send});
-   }
-
-   [[nodiscard]] size_t max_expected_inbound_message_size() const noexcept
-   {
-      return m_config.max_expected_inbound_message_size();
    }
 
    void remove_connection(std::shared_ptr<thread::connection> const &connection) noexcept
@@ -464,9 +602,9 @@ public:
       m_tasksQueue.emplace_back(task{.connection = connection, .action = task_action::remove});
    }
 
-   std::pair<char *, size_t> websocket_buffer() const noexcept
+   std::pair<char *, size_t> websocket_buffer() noexcept
    {
-      return {m_websocketBuffer.get(), max_expected_inbound_message_size()};
+      return {m_websocketBuffer.data(), m_websocketBuffer.size()};
    }
 
 private:
@@ -478,58 +616,7 @@ private:
    std::atomic_bool m_stopToken = false;
    std::unique_ptr<std::thread> m_thread = {};
 #endif
-   thread_config m_config;
-   std::unique_ptr<char[]> m_websocketBuffer = {};
-
-   [[nodiscard]] event_base &init_event_base()
-   {
-      auto *eventConfig = event_config_new();
-      assert(nullptr != eventConfig);
-      EXPECT_ERROR_CODE(0, event_config_set_flag(eventConfig, EVENT_BASE_FLAG_NOLOCK));
-      auto *eventBase = event_base_new_with_config(eventConfig);
-      assert(nullptr != eventBase);
-      event_config_free(eventConfig);
-      eventConfig = nullptr;
-      return *eventBase;
-   }
-
-   [[nodiscard]] socket_context init_event_context(size_t const initialSocketEventsCapacity)
-   {
-      socket_context socketContext
-      {
-         .eventBase = init_event_base(),
-         .multiHandle = curl_multi_init(),
-         .freeSocketEvents = nullptr,
-         .allSocketEvents = {},
-      };
-      assert(nullptr != socketContext.multiHandle);
-      for (size_t socketEventsCount = 0; socketEventsCount < initialSocketEventsCapacity; ++socketEventsCount)
-      {
-         auto &socketEvent = socketContext.allSocketEvents.emplace_back();
-         socketEvent.next = socketContext.freeSocketEvents;
-         socketContext.freeSocketEvents = std::addressof(socketEvent);
-      }
-      return socketContext;
-   }
-
-   void free_socket_context(socket_context &socketContext)
-   {
-#if (not defined(NDEBUG))
-      size_t socketEventsCount = 0;
-#endif
-      while (nullptr != socketContext.freeSocketEvents)
-      {
-         auto *socketEvent = socketContext.freeSocketEvents;
-         socketContext.freeSocketEvents = socketEvent->next;
-#if (not defined(NDEBUG))
-         ++socketEventsCount;
-#endif
-      }
-      assert(socketContext.allSocketEvents.size() == socketEventsCount);
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_cleanup(socketContext.multiHandle));
-      socketContext.multiHandle = nullptr;
-      event_base_free(std::addressof(socketContext.eventBase));
-   }
+   std::string m_websocketBuffer = {};
 
    void swap_task_queue(std::vector<task> &tasksQueue)
    {
@@ -538,32 +625,32 @@ private:
    }
 
 #if (201911L <= __cpp_lib_jthread)
-   void thread_handler(std::stop_token stopToken)
+   void thread_handler(std::stop_token stopToken, thread_config const &config)
 #else
-   void thread_handler()
+   void thread_handler(thread_config const &config)
 #endif
    {
-      set_thread_affinity(m_config.cpu_affinity());
+      set_thread_affinity(config.cpu_affinity());
 
       static global_context const globalContext = {};
 
-      auto socketContext = init_event_context(m_config.initial_connections_capacity());
+      auto eventContext = init_event_context(config.initial_connections_capacity());
       event eventTimer = {};
-      EXPECT_ERROR_CODE(0, evtimer_assign(std::addressof(eventTimer), std::addressof(socketContext.eventBase), &connection::event_timer_callback, std::addressof(socketContext)));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(socketContext.multiHandle, CURLMOPT_SOCKETDATA, std::addressof(socketContext)));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(socketContext.multiHandle, CURLMOPT_SOCKETFUNCTION, &connection::curl_socket_callback));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(socketContext.multiHandle, CURLMOPT_TIMERDATA, std::addressof(eventTimer)));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(socketContext.multiHandle, CURLMOPT_TIMERFUNCTION, &worker::curl_timer_callback));
+      EXPECT_ERROR_CODE(0, evtimer_assign(std::addressof(eventTimer), std::addressof(eventContext.eventBase), &connection::event_timer_callback, std::addressof(eventContext)));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_SOCKETDATA, std::addressof(eventContext)));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_SOCKETFUNCTION, &connection::curl_socket_callback));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_TIMERDATA, std::addressof(eventTimer)));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_TIMERFUNCTION, &worker::curl_timer_callback));
 
       std::vector<task> tasksQueue;
-      tasksQueue.reserve(m_config.initial_connections_capacity());
+      tasksQueue.reserve(config.initial_connections_capacity());
 #if (201911L <= __cpp_lib_jthread)
       while (false == stopToken.stop_requested())
 #else
       while (false == m_stopToken.load(std::memory_order_relaxed))
 #endif
       {
-         [[maybe_unused]] auto const eventBaseLoopRetCode = event_base_loop(std::addressof(socketContext.eventBase), EVLOOP_NONBLOCK);
+         [[maybe_unused]] auto const eventBaseLoopRetCode = event_base_loop(std::addressof(eventContext.eventBase), EVLOOP_NONBLOCK);
          assert(0 <= eventBaseLoopRetCode);
 
          swap_task_queue(tasksQueue);
@@ -573,32 +660,38 @@ private:
             {
             case task_action::add:
             {
-               task.connection->register_handle(socketContext);
+               task.connection->register_handle(eventContext);
             }
             break;
 
             case task_action::send:
             {
-               task.connection->send_message(socketContext);
+               task.connection->send_message(eventContext);
             }
             break;
 
             case task_action::remove:
             {
-               task.connection->unregister_handle(socketContext);
+               task.connection->unregister_handle(eventContext);
             }
             break;
             }
          }
          tasksQueue.clear();
+
+         connection *timedoutConnection = nullptr;
+         while (nullptr != (timedoutConnection = eventContext.timerQueue.pop(std::chrono::system_clock::now())))
+         {
+            timedoutConnection->tick(eventContext);
+         }
       }
 
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(socketContext.multiHandle, CURLMOPT_SOCKETDATA, nullptr));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(socketContext.multiHandle, CURLMOPT_SOCKETFUNCTION, nullptr));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(socketContext.multiHandle, CURLMOPT_TIMERDATA, nullptr));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(socketContext.multiHandle, CURLMOPT_TIMERFUNCTION, nullptr));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_SOCKETDATA, nullptr));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_SOCKETFUNCTION, nullptr));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_TIMERDATA, nullptr));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_TIMERFUNCTION, nullptr));
       evtimer_del(std::addressof(eventTimer));
-      free_socket_context(socketContext);
+      free_event_context(eventContext);
    }
 
    static void curl_timer_callback(CURLM const *, long const timeoutMs, void *userdata)
@@ -615,6 +708,57 @@ private:
          };
          EXPECT_ERROR_CODE(0, evtimer_add(eventTimeout, std::addressof(timeout)));
       }
+   }
+
+   [[nodiscard]] static event_base &init_event_base()
+   {
+      auto *eventConfig = event_config_new();
+      assert(nullptr != eventConfig);
+      EXPECT_ERROR_CODE(0, event_config_set_flag(eventConfig, EVENT_BASE_FLAG_NOLOCK));
+      auto *eventBase = event_base_new_with_config(eventConfig);
+      assert(nullptr != eventBase);
+      event_config_free(eventConfig);
+      eventConfig = nullptr;
+      return *eventBase;
+   }
+
+   [[nodiscard]] static event_context init_event_context(size_t const initialSocketEventsCapacity)
+   {
+      event_context eventContext
+      {
+         .eventBase = init_event_base(),
+         .multiHandle = curl_multi_init(),
+         .freeSocketEvents = nullptr,
+         .timerQueue = timer_queue{initialSocketEventsCapacity},
+         .allSocketEvents = {},
+      };
+      assert(nullptr != eventContext.multiHandle);
+      for (size_t socketEventsCount = 0; socketEventsCount < initialSocketEventsCapacity; ++socketEventsCount)
+      {
+         auto &socketEvent = eventContext.allSocketEvents.emplace_back();
+         socketEvent.eventOrNext = eventContext.freeSocketEvents;
+         eventContext.freeSocketEvents = std::addressof(socketEvent);
+      }
+      return eventContext;
+   }
+
+   static void free_event_context(event_context &eventContext)
+   {
+#if (not defined(NDEBUG))
+      size_t socketEventsCount = 0;
+#endif
+      while (nullptr != eventContext.freeSocketEvents)
+      {
+         auto *socketEvent = eventContext.freeSocketEvents;
+         eventContext.freeSocketEvents = std::get<socket_event *>(socketEvent->eventOrNext);
+#if (not defined(NDEBUG))
+         ++socketEventsCount;
+#endif
+      }
+      assert(eventContext.allSocketEvents.size() == socketEventsCount);
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_cleanup(eventContext.multiHandle));
+      eventContext.multiHandle = nullptr;
+      event_base_free(std::addressof(eventContext.eventBase));
    }
 };
 
@@ -681,7 +825,7 @@ public:
          {
             m_connectToStr.append(std::to_string(realAddress.value().port));
          }
-         m_connectTo.data = const_cast<char *>(m_connectToStr.c_str());
+         m_connectTo.data = m_connectToStr.data();
       }
       if (true == netInterface.name.has_value())
       {
@@ -711,7 +855,7 @@ public:
    curl_config &operator = (curl_config const &) = delete;
 
    template<typename report_error_callback>
-   [[nodiscard]] bool apply(CURL *handle, report_error_callback const &reportError) const
+   [[nodiscard]] bool apply(CURL *handle, report_error_callback const &reportError)
    {
       return
       (
@@ -763,18 +907,18 @@ private:
    }
 
    template<typename report_error_callback>
-   [[nodiscard]] bool setup_tls(CURL *handle, report_error_callback const &reportError) const
+   [[nodiscard]] bool setup_tls(CURL *handle, report_error_callback const &reportError)
    {
       assert(nullptr != handle);
       auto const sslCertificateAuthorityBlob = curl_blob
       {
-         .data = const_cast<char *>(m_sslCertificateAuthority.data()),
+         .data = m_sslCertificateAuthority.data(),
          .len = m_sslCertificateAuthority.size(),
          .flags = CURL_BLOB_NOCOPY,
       };
       auto const sslCertificateBlob = curl_blob
       {
-         .data = const_cast<char *>(m_sslCertificate.data()),
+         .data = m_sslCertificate.data(),
          .len = m_sslCertificate.size(),
          .flags = CURL_BLOB_NOCOPY
       };
@@ -909,7 +1053,7 @@ public:
       m_request->headers = headerNode;
    }
 
-   void register_handle(socket_context &) override
+   void register_handle(event_context &) override
    {
       /// context: worker thread
       assert(nullptr == m_handle);
@@ -926,16 +1070,16 @@ public:
       }
    }
 
-   void send_message(socket_context &socketContext) override
+   void send_message(event_context &eventContext) override
    {
       /// context: worker thread
-      assert(nullptr != socketContext.multiHandle);
+      assert(nullptr != eventContext.multiHandle);
       assert(nullptr != m_request);
       assert(connection_status::ready == m_status);
       if (true == setup_request())
       {
          m_status = connection_status::busy;
-         report_error(curl_multi_add_handle(socketContext.multiHandle, m_handle));
+         report_error(curl_multi_add_handle(eventContext.multiHandle, m_handle));
       }
    }
 
@@ -994,7 +1138,18 @@ public:
       m_request->timeout = timeout;
    }
 
-   void unregister_handle(socket_context &) override
+   [[noreturn]] void tick(event_context &) override
+   {
+      /// context: worker thread
+      assert(false && "Should never be called");
+#if (202202L <= __cpp_lib_unreachable)
+      std::unreachable();
+#else
+      std::abort();
+#endif
+   }
+
+   void unregister_handle(event_context &) override
    {
       /// context: worker thread
       assert(connection_status::busy != m_status);
@@ -1025,13 +1180,13 @@ private:
       m_status = connection_status::inactive;
    }
 
-   void on_recv_message(socket_context &socketContext, CURLMsg const &message) override
+   void on_recv_message(event_context &eventContext, CURLMsg const &message) override
    {
       /// context: worker thread
-      assert(nullptr != socketContext.multiHandle);
+      assert(nullptr != eventContext.multiHandle);
       assert(nullptr != message.easy_handle);
       assert(message.easy_handle == m_handle);
-      report_error(curl_multi_remove_handle(socketContext.multiHandle, m_handle));
+      report_error(curl_multi_remove_handle(eventContext.multiHandle, m_handle));
       assert(connection_status::busy == m_status);
       if (connection_status::busy == report_error(message.data.result))
       {
@@ -1044,14 +1199,18 @@ private:
    }
 
    void on_attach_socket(curl_socket_t const) override
-   {}
+   {
+      /// context: worker thread
+   }
 
    void on_detach_socket(curl_socket_t const) override
-   {}
+   {
+      /// context: worker thread
+   }
 
    [[nodiscard]] curl_slist *pop_free_node()
    {
-      /// context: any thread
+      /// context: client thread
       if (nullptr == m_freeHead)
       {
          return std::addressof(m_allNodes.emplace_back(curl_slist{.data = nullptr, .next = nullptr}));
@@ -1193,30 +1352,37 @@ private:
          (connection_status::ready == report_error(curl_easy_setopt(m_handle, CURLOPT_UPLOAD, 1L)))
       );
 
-      default: std::abort();
+      default:
+      {
+#if (202202L <= __cpp_lib_unreachable)
+         std::unreachable();
+#else
+         std::abort();
+#endif
+      }
       }
    }
 
    char *store_header(std::string_view const header)
    {
-      /// context: any thread
+      /// context: client thread
       assert(false == header.empty());
       if (m_allValues.size() == m_lastValueIndex)
       {
          ++m_lastValueIndex;
-         return const_cast<char *>(m_allValues.emplace_back(header).c_str());
+         return m_allValues.emplace_back(header).data();
       }
-      return const_cast<char *>(m_allValues[m_lastValueIndex++].assign(header).c_str());
+      return m_allValues[m_lastValueIndex++].assign(header).data();
    }
 
    char *store_header(std::string_view const headerName, std::string_view const headerValue)
    {
-      /// context: any thread
+      /// context: client thread
       assert(false == headerName.empty());
       auto &header = (m_allValues.size() == m_lastValueIndex) ? m_allValues.emplace_back() : m_allValues[m_lastValueIndex];
       ++m_lastValueIndex;
       header.reserve(headerName.size() + headerValue.size() + 2);
-      return const_cast<char *>(header.assign(headerName).append(":").append(headerValue).c_str());
+      return header.assign(headerName).append(":").append(headerValue).data();
    }
 
    static size_t header_callback(char const *buffer, size_t const size, size_t const nitems, void *userdata)
@@ -1436,19 +1602,22 @@ public:
       std::shared_ptr<websocket_listener> const &listener,
       std::unique_ptr<curl_config> config,
       std::string_view const urlPath,
-      std::chrono::milliseconds const timeout,
+      std::chrono::milliseconds const connectTimeout,
+      std::chrono::milliseconds const tickTimeout,
       std::pair<char *, size_t> inboundMessageBuffer
    ) :
       connection(),
       m_listener(listener),
       m_config(std::move(config)),
-      m_timeout(timeout),
+      m_tickTimeout(tickTimeout),
+      m_connectTimeout(connectTimeout),
       m_inboundMessageBuffer(inboundMessageBuffer)
    {
       /// context: client thread
       assert(nullptr != m_listener);
       assert(nullptr != m_config);
-      assert(std::chrono::milliseconds::zero() < m_timeout);
+      assert(std::chrono::milliseconds::zero() <= m_tickTimeout);
+      assert(std::chrono::milliseconds::zero() < m_connectTimeout);
       if ((true == urlPath.empty()) || ('/' != urlPath.at(0)))
       {
          m_urlPath.assign("/");
@@ -1469,17 +1638,17 @@ public:
    websocket_connection &operator = (websocket_connection &&) = delete;
    websocket_connection &operator = (websocket_connection const &) = delete;
 
-   void register_handle(socket_context &socketContext) override
+   void register_handle(event_context &eventContext) override
    {
       /// context: worker thread
-      assert(nullptr != socketContext.multiHandle);
+      assert(nullptr != eventContext.multiHandle);
       assert(nullptr == m_multiHandle);
       assert(nullptr == m_handle);
       assert(nullptr != m_config);
       assert(connection_status::ready != m_status);
       assert(connection_status::busy != m_status);
       assert(false == m_outboundMessageReady);
-      m_multiHandle = socketContext.multiHandle;
+      m_multiHandle = eventContext.multiHandle;
       m_handle = curl_easy_init();
       m_status = connection_status::initializing;
       assert(nullptr != m_handle);
@@ -1488,25 +1657,25 @@ public:
          (connection_status::initializing == report_error(curl_easy_setopt(m_handle, CURLOPT_CONNECT_ONLY, 2L))) &&
          (connection_status::initializing == report_error(curl_easy_setopt(m_handle, CURLOPT_PRIVATE, this))) &&
          (connection_status::initializing == report_error(curl_easy_setopt(m_handle, CURLOPT_REQUEST_TARGET, m_urlPath.c_str()))) &&
-         (connection_status::initializing == report_error(curl_easy_setopt(m_handle, CURLOPT_TIMEOUT_MS, static_cast<long>(m_timeout.count()))))
+         (connection_status::initializing == report_error(curl_easy_setopt(m_handle, CURLOPT_TIMEOUT_MS, static_cast<long>(m_connectTimeout.count()))))
       )
       {
          report_error(curl_multi_add_handle(m_multiHandle, m_handle));
       }
    }
 
-   void send_message(socket_context &socketContext) override
+   void send_message(event_context &eventContext) override
    {
       /// context: worker thread
-      assert(nullptr != socketContext.multiHandle);
-      assert((nullptr == m_multiHandle) || (m_multiHandle == socketContext.multiHandle));
+      assert(nullptr != eventContext.multiHandle);
+      assert((nullptr == m_multiHandle) || (m_multiHandle == eventContext.multiHandle));
       assert((nullptr == m_multiHandle) == (nullptr == m_handle));
       assert(connection_status::busy != m_status);
       if (connection_status::ready == m_status) [[likely]]
       {
          assert(nullptr != m_handle);
          assert(false == m_outboundMessage.empty());
-         event_assign_callback(socketContext.eventBase, EV_WRITE);
+         event_assign_callback(eventContext.eventBase, EV_WRITE);
       }
       else if (connection_status::initializing == m_status)
       {
@@ -1523,22 +1692,40 @@ public:
       m_outboundMessage.assign(outboundMessage);
    }
 
-   void unregister_handle(socket_context &socketContext) override
+   void tick(event_context &eventContext) override
    {
       /// context: worker thread
-      assert(nullptr != socketContext.multiHandle);
-      assert((nullptr == m_multiHandle) || (m_multiHandle == socketContext.multiHandle));
+      assert(nullptr != eventContext.multiHandle);
+      assert(std::chrono::milliseconds::zero() < m_tickTimeout);
+      if (connection_status::inactive != m_status)
+      {
+         assert(nullptr != m_multiHandle);
+         assert(m_multiHandle == eventContext.multiHandle);
+         assert(nullptr != m_handle);
+         assert(nullptr != m_socketEvent);
+         assert(connection_status::initializing != m_status);
+         m_listener->on_tick();
+         eventContext.timerQueue.push(std::chrono::system_clock::now() + m_tickTimeout, *this);
+      }
+   }
+
+   void unregister_handle(event_context &eventContext) override
+   {
+      /// context: worker thread
+      assert(nullptr != eventContext.multiHandle);
+      assert((nullptr == m_multiHandle) || (m_multiHandle == eventContext.multiHandle));
       assert((nullptr == m_multiHandle) == (nullptr == m_handle));
       assert((nullptr != m_handle) || (connection_status::ready != m_status));
       if (nullptr != m_socketEvent)
       {
-         release_socket_event(socketContext, *m_socketEvent);
+         release_socket_event(eventContext, *m_socketEvent);
          m_socketEvent = nullptr;
       }
       if (nullptr != m_handle)
       {
          deactivate();
       }
+      eventContext.timerQueue.remove(*this);
    }
 
 private:
@@ -1547,7 +1734,8 @@ private:
    std::shared_ptr<websocket_listener> m_listener;
    std::unique_ptr<curl_config> m_config;
    std::string m_urlPath = {};
-   std::chrono::milliseconds m_timeout;
+   std::chrono::milliseconds m_tickTimeout;
+   std::chrono::milliseconds m_connectTimeout;
    std::string m_outboundMessage = {};
    std::pair<char *, size_t> m_inboundMessageBuffer;
    socket_event *m_socketEvent = nullptr;
@@ -1561,10 +1749,10 @@ private:
       /// context: worker thread
       assert(nullptr != m_multiHandle);
       assert(nullptr != m_handle);
-      if ((nullptr != m_socketEvent) && (nullptr != m_socketEvent->ev.ev_base))
+      if ((nullptr != m_socketEvent) && (nullptr != std::get<event>(m_socketEvent->eventOrNext).ev_base))
       {
          assert(CURL_SOCKET_BAD != m_dataSocket);
-         EXPECT_ERROR_CODE(0, event_del(std::addressof(m_socketEvent->ev)));
+         EXPECT_ERROR_CODE(0, event_del(std::addressof(std::get<event>(m_socketEvent->eventOrNext))));
       }
       EXPECT_ERROR_CODE(CURLM_OK, curl_multi_remove_handle(m_multiHandle, m_handle));
       m_multiHandle = nullptr;
@@ -1583,49 +1771,57 @@ private:
       assert(nullptr != m_socketEvent);
       assert(connection_status::initializing != m_status);
       assert(connection_status::inactive != m_status);
-      size_t recvBytes = 0;
-      curl_ws_frame const *wsMeta = nullptr;
-      auto const errorCode = curl_ws_recv(
-         m_handle,
-         m_inboundMessageBuffer.first,
-         m_inboundMessageBuffer.second,
-         std::addressof(recvBytes),
-         std::addressof(wsMeta)
-      );
-      if (connection_status::inactive != report_error(errorCode)) [[likely]]
+      for (CURLcode errorCode = CURLE_OK; CURLE_OK == errorCode; )
       {
-         if (0 < recvBytes) [[likely]]
+         size_t recvBytes = 0;
+         curl_ws_frame const *wsMeta = nullptr;
+         errorCode = curl_ws_recv(
+            m_handle,
+            m_inboundMessageBuffer.first,
+            m_inboundMessageBuffer.second,
+            std::addressof(recvBytes),
+            std::addressof(wsMeta)
+         );
+         if (connection_status::inactive != report_error(errorCode)) [[likely]]
          {
-            assert(CURLE_AGAIN != errorCode);
-            assert(wsMeta->len == recvBytes);
-            assert(0 <= wsMeta->bytesleft);
-            auto messageType = (CURLWS_TEXT == (CURLWS_TEXT & wsMeta->flags))
-               ? websocket_message_type::text
-               : (CURLWS_BINARY == (CURLWS_BINARY & wsMeta->flags))
-                  ? websocket_message_type::binary
-                  : (CURLWS_PING == (CURLWS_PING & wsMeta->flags))
-                     ? websocket_message_type::ping
-                     : (CURLWS_PONG == (CURLWS_PONG & wsMeta->flags))
-                        ? websocket_message_type::pong
-                        : (CURLWS_CLOSE == (CURLWS_CLOSE & wsMeta->flags))
-                           ? websocket_message_type::close
-                           : websocket_message_type::unknown
-            ;
-            assert(websocket_message_type::unknown != messageType);
-            m_listener->on_message_recv(
-               std::string_view{m_inboundMessageBuffer.first, recvBytes},
-               messageType,
-               static_cast<size_t>(wsMeta->bytesleft)
+            if (0 < recvBytes) [[likely]]
+            {
+               assert(CURLE_AGAIN != errorCode);
+               assert(wsMeta->len == recvBytes);
+               assert(0 <= wsMeta->bytesleft);
+               auto messageType = (CURLWS_TEXT == (CURLWS_TEXT & wsMeta->flags))
+                  ? websocket_message_type::text
+                  : (CURLWS_BINARY == (CURLWS_BINARY & wsMeta->flags))
+                     ? websocket_message_type::binary
+                     : (CURLWS_PING == (CURLWS_PING & wsMeta->flags))
+                        ? websocket_message_type::ping
+                        : (CURLWS_PONG == (CURLWS_PONG & wsMeta->flags))
+                           ? websocket_message_type::pong
+                           : (CURLWS_CLOSE == (CURLWS_CLOSE & wsMeta->flags))
+                              ? websocket_message_type::close
+                              : websocket_message_type::unknown
+               ;
+               assert(websocket_message_type::unknown != messageType);
+               m_listener->on_message_recv(
+                  std::string_view{m_inboundMessageBuffer.first, recvBytes},
+                  messageType,
+                  static_cast<size_t>(wsMeta->bytesleft)
+               );
+               if (m_inboundMessageBuffer.second == recvBytes)
+               {
+                  continue;
+               }
+            }
+            else
+            {
+               assert(CURLE_AGAIN == errorCode);
+            }
+            event_assign_callback(
+               *std::get<event>(m_socketEvent->eventOrNext).ev_base,
+               (connection_status::busy == m_status) ? EV_WRITE : EV_READ
             );
          }
-         else
-         {
-            assert(CURLE_AGAIN == errorCode);
-         }
-         event_assign_callback(
-            *m_socketEvent->ev.ev_base,
-            (connection_status::busy == m_status) ? EV_WRITE : EV_READ
-         );
+         break;
       }
    }
 
@@ -1650,7 +1846,7 @@ private:
          {
             m_status = connection_status::busy;
             assert(m_outboundMessage.size() == sentBytes);
-            event_assign_callback(*m_socketEvent->ev.ev_base, EV_WRITE);
+            event_assign_callback(*std::get<event>(m_socketEvent->eventOrNext).ev_base, EV_WRITE);
          }
       }
       else
@@ -1659,7 +1855,7 @@ private:
          m_outboundMessage.clear();
          m_status = connection_status::ready;
          m_listener->on_message_sent();
-         event_assign_callback(*m_socketEvent->ev.ev_base, 0);
+         event_assign_callback(*std::get<event>(m_socketEvent->eventOrNext).ev_base, 0);
       }
    }
 
@@ -1680,10 +1876,10 @@ private:
       assert((socket == m_resolverSocket) || (socket == m_dataSocket));
    }
 
-   void on_recv_message(socket_context &socketContext, CURLMsg const &message) override
+   void on_recv_message(event_context &eventContext, CURLMsg const &message) override
    {
       /// context: worker thread
-      assert(nullptr != socketContext.multiHandle);
+      assert(nullptr != eventContext.multiHandle);
       assert(nullptr != message.easy_handle);
       assert(message.easy_handle == m_handle);
       assert(connection_status::inactive != m_status);
@@ -1691,17 +1887,21 @@ private:
       {
          assert(nullptr == m_socketEvent);
          assert(CURL_SOCKET_BAD != m_dataSocket);
-         m_socketEvent = acquire_socket_event(socketContext);
+         m_socketEvent = acquire_socket_event(eventContext);
          assert(nullptr != m_socketEvent);
          m_status = connection_status::ready;
+         if (std::chrono::milliseconds::zero() < m_tickTimeout)
+         {
+            eventContext.timerQueue.push(std::chrono::system_clock::now() + m_tickTimeout, *this);
+         }
          if (true == m_outboundMessageReady)
          {
             m_outboundMessageReady = false;
-            event_assign_callback(socketContext.eventBase, EV_WRITE);
+            event_assign_callback(eventContext.eventBase, EV_WRITE);
          }
          else
          {
-            event_assign_callback(socketContext.eventBase, 0);
+            event_assign_callback(eventContext.eventBase, 0);
          }
       }
       else
@@ -1740,14 +1940,14 @@ private:
       assert(nullptr != m_socketEvent);
       assert(CURL_SOCKET_BAD != m_dataSocket);
       assert(connection_status::inactive != m_status);
-      if (nullptr != m_socketEvent->ev.ev_base) [[likely]]
+      if (nullptr != std::get<event>(m_socketEvent->eventOrNext).ev_base) [[likely]]
       {
-         EXPECT_ERROR_CODE(0, event_del(std::addressof(m_socketEvent->ev)));
+         EXPECT_ERROR_CODE(0, event_del(std::addressof(std::get<event>(m_socketEvent->eventOrNext))));
       }
       EXPECT_ERROR_CODE(
          0,
          event_assign(
-            std::addressof(m_socketEvent->ev),
+            std::addressof(std::get<event>(m_socketEvent->eventOrNext)),
             std::addressof(eventBase),
             m_dataSocket,
             EV_READ | additionalSocketEventKind,
@@ -1755,7 +1955,7 @@ private:
             this
          )
       );
-      EXPECT_ERROR_CODE(0, event_add(std::addressof(m_socketEvent->ev), nullptr));
+      EXPECT_ERROR_CODE(0, event_add(std::addressof(std::get<event>(m_socketEvent->eventOrNext)), nullptr));
    }
 
    static void event_socket_callback([[maybe_unused]] evutil_socket_t const socket, short const socketEventKind, void *userdata)
@@ -1792,7 +1992,8 @@ thread::websocket::websocket(thread const &thread, std::shared_ptr<websocket_lis
             std::nullopt
          ),
          wsConfig.url_path(),
-         wsConfig.timeout(),
+         wsConfig.connect_timeout(),
+         wsConfig.tick_timeout(),
          thread.m_worker->websocket_buffer()
       )
    )
@@ -1814,7 +2015,8 @@ thread::websocket::websocket(thread const &thread, std::shared_ptr<websocket_lis
             wssConfig.ssl_certificate()
          ),
          wssConfig.url_path(),
-         wssConfig.timeout(),
+         wssConfig.connect_timeout(),
+         wssConfig.tick_timeout(),
          thread.m_worker->websocket_buffer()
       )
    )
@@ -1849,14 +2051,27 @@ void thread::websocket::write(std::string_view message)
    m_worker->enqueue_request(m_connection);
 }
 
-thread::thread(thread &&rhs) noexcept = default;
+thread::thread(thread &&rhs) noexcept :
+   m_worker(std::forward<decltype(rhs.m_worker)>(rhs.m_worker))
+{
+   assert(nullptr != m_worker);
+}
 
-thread::thread(thread const &rhs) noexcept = default;
+thread::thread(thread const &rhs) noexcept :
+   m_worker(rhs.m_worker)
+{
+   assert(nullptr != m_worker);
+}
 
 thread::thread(thread_config const config) :
    m_worker(std::make_shared<worker>(config))
-{}
+{
+   assert(nullptr != m_worker);
+}
 
-thread::~thread() = default;
+thread::~thread()
+{
+   m_worker.reset();
+}
 
 }

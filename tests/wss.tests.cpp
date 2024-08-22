@@ -57,7 +57,7 @@ struct test_websocket_client_traits<test_websocket_stream>
 #else
          .with_ssl_certificate(test_webthread_certificate_pem(), web::ssl_certificate_type::pem)
 #endif
-         .with_timeout(test_bad_request_timeout)
+         .with_connect_timeout(test_bad_request_timeout)
          .with_url_path("/")
       ;
       return testConfig;
@@ -76,7 +76,7 @@ struct test_websocket_client_traits<test_websocket_stream>
 #endif
          .with_keep_alive_delay(test_keep_alive_delay)
          .with_peer_real_address(test_loopback_ip, testPeerPort)
-         .with_timeout(test_good_request_timeout)
+         .with_connect_timeout(test_good_request_timeout)
          .with_url_path("/")
       ;
       return testConfig;

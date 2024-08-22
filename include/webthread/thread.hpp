@@ -45,6 +45,7 @@ private:
 public:
    class rest_client;
    class rest_request;
+   class timer_queue;
    class websocket;
 
 public:

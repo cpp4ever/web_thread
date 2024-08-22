@@ -47,7 +47,7 @@ struct test_websocket_client_traits<test_websocket_stream>
    {
       auto const testConfig = test_config{testPeerIp, test_peer_port}
          .with_keep_alive_delay(test_keep_alive_delay)
-         .with_timeout(test_bad_request_timeout)
+         .with_connect_timeout(test_bad_request_timeout)
       ;
       return testConfig;
    }
@@ -63,7 +63,7 @@ struct test_websocket_client_traits<test_websocket_stream>
          .with_interface(web::default_interface, test_loopback_ip)
 #endif
          .with_keep_alive_delay(test_keep_alive_delay)
-         .with_timeout(test_good_request_timeout)
+         .with_connect_timeout(test_good_request_timeout)
          .with_url_path("/")
       ;
       return testConfig;

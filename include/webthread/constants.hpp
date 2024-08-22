@@ -30,7 +30,9 @@
 namespace web
 {
 
+constexpr std::chrono::milliseconds default_connect_timeout = std::chrono::seconds{1};
 constexpr std::chrono::seconds default_keep_alive_delay = std::chrono::minutes{1};
 constexpr std::chrono::milliseconds default_request_timeout = std::chrono::seconds{1};
+constexpr std::chrono::milliseconds default_tick_timeout = std::chrono::milliseconds::zero();
 
 }

@@ -78,7 +78,7 @@ jobs:
 
     - name: Install
       run: |
-        brew install cmake ninja openssl
+        brew install --quiet cmake ninja openssl
         pipx install git+https://github.com/gcovr/gcovr.git@7.2#egg=gcovr
         ${{matrix.cc}} --version
         ${{matrix.cxx}} --version

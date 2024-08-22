@@ -29,14 +29,23 @@
 
 #include <boost/asio/ip/address.hpp> ///< for boost::asio::ip::address
 #include <boost/asio/ip/tcp.hpp> ///< for boost::asio::ip::tcp::socket
+#include <boost/asio/error.hpp> ///< for boost::asio::error::make_error_code
 #if (not defined(WIN32))
 #  include <boost/asio/ssl/stream_base.hpp> ///< for boost::asio::ssl::stream_base::handshake_type
+#  include <boost/asio/ssl/error.hpp> ///< for boost::asio::ssl::error::stream_errors
 #endif
 #include <boost/asio/strand.hpp> ///< for boost::asio::make_strand
 #include <boost/beast.hpp> ///< for boost::beast::get_lowest_layer, boost::beast::role_type, boost::beast::tcp_stream
-#include <boost/beast/websocket.hpp> ///< for boost::beast::websocket::close_code, boost::beast::websocket::close_reason, boost::beast::websocket::error, boost::beast::websocket::stream, boost::beast::websocket::stream_base::timeout
+/// for
+///   boost::beast::websocket::close_code,
+///   boost::beast::websocket::close_reason,
+///   boost::beast::websocket::error,
+///   boost::beast::websocket::make_error_code,
+///   boost::beast::websocket::stream,
+///   boost::beast::websocket::stream_base::timeout
+#include <boost/beast/websocket.hpp>
 #if (not defined(WIN32))
-#include <boost/beast/websocket/ssl.hpp> ///< for boost::beast::async_teardown
+#  include <boost/beast/websocket/ssl.hpp> ///< for boost::beast::async_teardown
 #endif
 #include <boost/system/error_code.hpp> ///< for boost::system::error_code
 #if (defined(WIN32))
@@ -97,7 +106,13 @@ void test_websocket_server<test_websocket_stream>::async_read(test_websocket_str
       m_inboundBuffer,
       [&] (auto testErrorCode, auto const)
       {
-         if (boost::beast::websocket::error::closed == testErrorCode)
+         if (
+#if (not defined(WIN32))
+            (boost::asio::ssl::error::make_error_code(boost::asio::ssl::error::stream_errors::stream_truncated) == testErrorCode) ||
+#endif
+            (boost::beast::websocket::make_error_code(boost::beast::websocket::error::closed) == testErrorCode) ||
+            (boost::asio::error::make_error_code(boost::asio::error::eof) == testErrorCode)
+         )
          {
             return;
          }

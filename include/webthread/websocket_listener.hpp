@@ -43,13 +43,14 @@ public:
    websocket_listener &operator = (websocket_listener &&) = delete;
    websocket_listener &operator = (websocket_listener const &) = delete;
 
-   virtual void on_error(int errorCode, std::string_view description) = 0;
+   virtual void on_error(intptr_t errorCode, std::string_view description) = 0;
    virtual void on_message_recv(
       std::string_view data,
       websocket_message_type messageType,
       size_t bytesLeft
    ) = 0;
    virtual void on_message_sent() = 0;
+   virtual void on_tick() = 0;
 
 protected:
    [[nodiscard]] websocket_listener() noexcept = default;

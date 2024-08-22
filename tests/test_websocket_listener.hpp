@@ -42,7 +42,8 @@ public:
    test_websocket_listener &operator = (test_websocket_listener &&) = delete;
    test_websocket_listener &operator = (test_websocket_listener const &) = delete;
 
-   MOCK_METHOD(void, on_error, (int testErrorCode, std::string_view testErrorDescription), (override));
+   MOCK_METHOD(void, on_error, (intptr_t testErrorCode, std::string_view testErrorDescription), (override));
    MOCK_METHOD(void, on_message_recv, (std::string_view testData, web::websocket_message_type testMessageType, size_t testBytesLeft), (override));
    MOCK_METHOD(void, on_message_sent, (), (override));
+   MOCK_METHOD(void, on_tick, (), (override));
 };

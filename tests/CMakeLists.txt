@@ -69,6 +69,7 @@ if(CXX_SANITIZERS_LENGTH GREATER 0)
             report_error_type=true
             silence_unsigned_overflow=true
          SUPPRESSIONS
+            shift-base:*/boost-src/*
             shift-base:*/c_ares-src/*
             shift-base:*/curl-src/*
             shift-base:*/MacOSX.platform/Developer/SDKs/*
