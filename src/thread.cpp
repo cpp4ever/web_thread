@@ -330,7 +330,8 @@ struct [[nodiscard("discarded-value expression detected")]] event_context final
    {
       socketEvent = std::addressof(eventContext.allSocketEvents.emplace_back());
    }
-   socketEvent->eventOrNext = event{.ev_base = nullptr};
+   socketEvent->eventOrNext = event{};
+   std::memset(std::addressof(std::get<event>(socketEvent->eventOrNext)), 0, sizeof(event));
    return socketEvent;
 }
 
@@ -1883,7 +1884,10 @@ private:
       assert(nullptr != message.easy_handle);
       assert(message.easy_handle == m_handle);
       assert(connection_status::inactive != m_status);
-      if (connection_status::initializing == report_error(message.data.result))
+      if (
+         (connection_status::initializing == report_error(message.data.result)) &&
+         (connection_status::initializing == report_error(curl_easy_setopt(m_handle, CURLOPT_TIMEOUT_MS, 0L)))
+      )
       {
          assert(nullptr == m_socketEvent);
          assert(CURL_SOCKET_BAD != m_dataSocket);
