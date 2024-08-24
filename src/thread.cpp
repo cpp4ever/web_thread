@@ -24,9 +24,12 @@
 */
 
 #include "webthread/constants.hpp" ///< for web::default_request_timeout
+#include "webthread/net_interface.hpp" ///< for web::net_interface
+#include "webthread/peer_address.hpp" ///< for web::peer_address
 #include "webthread/rest_client.hpp" ///< for web::thread::rest_client
 #include "webthread/rest_method.hpp" ///< for web::rest_method
 #include "webthread/rest_request.hpp" ///< for web::thread::rest_request
+#include "webthread/ssl_certificate.hpp" ///< for web::ssl_certificate, web::ssl_certificate_type
 #include "webthread/thread.hpp" ///< for web::thread
 #include "webthread/thread_config.hpp" ///< for web::thread_config
 #include "webthread/websocket.hpp" ///< for web::thread::websocket
@@ -41,29 +44,34 @@
 #  include <winbase.h> ///< for SetThreadAffinityMask
 #endif
 
-#include <algorithm> ///< for std::find
-#include <atomic> ///< for ATOMIC_FLAG_INIT, std::atomic_bool, std::atomic_flag
+#include <algorithm> ///< for std::find_if, std::min
+/// for
+///   ATOMIC_FLAG_INIT,
+///   std::atomic_bool,
+///   std::atomic_flag,
+///   std::memory_order_acquire,
+///   std::memory_order_relaxed,
+///   std::memory_order_release
+#include <atomic>
 #include <cassert> ///< for assert
 #include <chrono> ///< for std::chrono::milliseconds, std::chrono::seconds, std::chrono::system_clock
 #include <cstddef> ///< for size_t
-#include <cstdint> ///< for intptr_t, uint16_t
-#include <cstring> ///< for std::memcpy
+#include <cstdint> ///< for int8_t, intptr_t, uint16_t, uint8_t
+#include <cstdlib> ///< for std::abort
+#include <cstring> ///< for std::memcpy, std::memset
 #include <deque> ///< for std::deque
-#include <memory> ///< for std::addressof, std::make_unique, std::memory_order_acquire, std::memory_order_relaxed, std::memory_order_release, std::unique_ptr
+#include <memory> ///< for std::addressof, std::make_shared, std::make_unique, std::shared_ptr, std::unique_ptr
 #include <mutex> ///< for std::scoped_lock
+#include <optional> ///< for std::nullopt, std::optional
 #if (201911L <= __cpp_lib_jthread)
 #  include <stop_token> ///< for std::stop_token
 #endif
-#include <string> ///< for std::string
-#if (defined(WIN32))
-#  include <string.h> ///< for _strnicmp
-#else
-#  include <strings.h> ///< for strncasecmp
-#endif
+#include <string> ///< for std::string, std::to_string
+#include <string_view> ///< for std::string_view
 #include <thread> ///< for std::jthread, std::thread
 #include <variant> ///< for std::get, std::variant
-#include <vector> ///< for std::begin, std::end, std::erase, std::vector
-#include <utility> ///< for std::pair, std::swap
+#include <vector> ///< for std::begin, std::end, std::vector
+#include <utility> ///< for std::forward, std::move, std::pair, std::swap, std::unreachable
 
 namespace web
 {
@@ -146,7 +154,7 @@ public:
          }
          lastPriorityTask = priorityTask;
       }
-      auto &task = free_task();
+      auto &task = new_task();
       assert(nullptr == task.next);
       assert(std::chrono::system_clock::time_point{} == task.expirationTime);
       assert(nullptr == task.connection);
@@ -195,7 +203,7 @@ private:
    timer_task *m_freeTaskList = nullptr;
    std::deque<timer_task> m_allTasks = {};
 
-   [[nodiscard]] timer_task &free_task()
+   [[nodiscard]] timer_task &new_task()
    {
       if (nullptr == m_freeTaskList)
       {
@@ -315,6 +323,7 @@ struct [[nodiscard("discarded-value expression detected")]] event_context final
    CURLM *multiHandle = nullptr;
    socket_event *freeSocketEvents = nullptr;
    thread::timer_queue timerQueue;
+   event eventTimer = {};
    std::deque<socket_event> allSocketEvents = {};
 };
 
@@ -619,6 +628,53 @@ private:
 #endif
    std::string m_websocketBuffer = {};
 
+#if (201911L <= __cpp_lib_jthread)
+   void busy_loop(std::stop_token stopToken, event_context &eventContext, std::vector<task> &taskQueue)
+#else
+   void busy_loop(event_context &eventContext, std::vector<task> &taskQueue)
+#endif
+   {
+#if (201911L <= __cpp_lib_jthread)
+      while (false == stopToken.stop_requested())
+#else
+      while (false == m_stopToken.load(std::memory_order_relaxed))
+#endif
+      {
+         handle_events(eventContext);
+         handle_task_queue(eventContext, taskQueue);
+         handle_timer_queue(eventContext);
+      }
+   }
+
+   void handle_task_queue(event_context &eventContext, std::vector<task> &taskQueue)
+   {
+      swap_task_queue(taskQueue);
+      for (auto &task : taskQueue)
+      {
+         switch (task.action)
+         {
+         case task_action::add:
+         {
+            task.connection->register_handle(eventContext);
+         }
+         break;
+
+         case task_action::send:
+         {
+            task.connection->send_message(eventContext);
+         }
+         break;
+
+         case task_action::remove:
+         {
+            task.connection->unregister_handle(eventContext);
+         }
+         break;
+         }
+      }
+      taskQueue.clear();
+   }
+
    void swap_task_queue(std::vector<task> &tasksQueue)
    {
       [[maybe_unused]] std::scoped_lock const guard(m_tasksQueueLock);
@@ -635,63 +691,24 @@ private:
 
       static global_context const globalContext = {};
 
-      auto eventContext = init_event_context(config.initial_connections_capacity());
-      event eventTimer = {};
-      EXPECT_ERROR_CODE(0, evtimer_assign(std::addressof(eventTimer), std::addressof(eventContext.eventBase), &connection::event_timer_callback, std::addressof(eventContext)));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_SOCKETDATA, std::addressof(eventContext)));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_SOCKETFUNCTION, &connection::curl_socket_callback));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_TIMERDATA, std::addressof(eventTimer)));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_TIMERFUNCTION, &worker::curl_timer_callback));
-
-      std::vector<task> tasksQueue;
-      tasksQueue.reserve(config.initial_connections_capacity());
-#if (201911L <= __cpp_lib_jthread)
-      while (false == stopToken.stop_requested())
-#else
-      while (false == m_stopToken.load(std::memory_order_relaxed))
-#endif
+      event_context eventContext
       {
-         [[maybe_unused]] auto const eventBaseLoopRetCode = event_base_loop(std::addressof(eventContext.eventBase), EVLOOP_NONBLOCK);
-         assert(0 <= eventBaseLoopRetCode);
+         .eventBase = init_event_base(),
+         .timerQueue = timer_queue{config.initial_connections_capacity()},
+      };
+      init_event_context(eventContext, config.initial_connections_capacity());
 
-         swap_task_queue(tasksQueue);
-         for (auto &task : tasksQueue)
-         {
-            switch (task.action)
-            {
-            case task_action::add:
-            {
-               task.connection->register_handle(eventContext);
-            }
-            break;
+      std::vector<task> taskQueue;
+      taskQueue.reserve(config.initial_connections_capacity());
+      busy_loop(
+#if (201911L <= __cpp_lib_jthread)
+         stopToken,
+#endif
+         eventContext,
+         taskQueue
+      );
+      handle_task_queue(eventContext, taskQueue);
 
-            case task_action::send:
-            {
-               task.connection->send_message(eventContext);
-            }
-            break;
-
-            case task_action::remove:
-            {
-               task.connection->unregister_handle(eventContext);
-            }
-            break;
-            }
-         }
-         tasksQueue.clear();
-
-         connection *timedoutConnection = nullptr;
-         while (nullptr != (timedoutConnection = eventContext.timerQueue.pop(std::chrono::system_clock::now())))
-         {
-            timedoutConnection->tick(eventContext);
-         }
-      }
-
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_SOCKETDATA, nullptr));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_SOCKETFUNCTION, nullptr));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_TIMERDATA, nullptr));
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(eventContext.multiHandle, CURLMOPT_TIMERFUNCTION, nullptr));
-      evtimer_del(std::addressof(eventTimer));
       free_event_context(eventContext);
    }
 
@@ -711,6 +728,18 @@ private:
       }
    }
 
+   static void init_curl_context(event_context &eventContext)
+   {
+      assert(nullptr == eventContext.multiHandle);
+      auto *multiHandle = curl_multi_init();
+      assert(nullptr != multiHandle);
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(multiHandle, CURLMOPT_SOCKETDATA, std::addressof(eventContext)));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(multiHandle, CURLMOPT_SOCKETFUNCTION, &connection::curl_socket_callback));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(multiHandle, CURLMOPT_TIMERDATA, std::addressof(eventContext.eventTimer)));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(multiHandle, CURLMOPT_TIMERFUNCTION, &worker::curl_timer_callback));
+      eventContext.multiHandle = multiHandle;
+   }
+
    [[nodiscard]] static event_base &init_event_base()
    {
       auto *eventConfig = event_config_new();
@@ -723,28 +752,43 @@ private:
       return *eventBase;
    }
 
-   [[nodiscard]] static event_context init_event_context(size_t const initialSocketEventsCapacity)
+   static void init_event_context(event_context &eventContext, size_t const initialSocketEventsCapacity)
    {
-      event_context eventContext
-      {
-         .eventBase = init_event_base(),
-         .multiHandle = curl_multi_init(),
-         .freeSocketEvents = nullptr,
-         .timerQueue = timer_queue{initialSocketEventsCapacity},
-         .allSocketEvents = {},
-      };
-      assert(nullptr != eventContext.multiHandle);
+      EXPECT_ERROR_CODE(
+         0,
+         evtimer_assign(
+            std::addressof(eventContext.eventTimer),
+            std::addressof(eventContext.eventBase),
+            &connection::event_timer_callback,
+            std::addressof(eventContext)
+         )
+      );
       for (size_t socketEventsCount = 0; socketEventsCount < initialSocketEventsCapacity; ++socketEventsCount)
       {
          auto &socketEvent = eventContext.allSocketEvents.emplace_back();
          socketEvent.eventOrNext = eventContext.freeSocketEvents;
          eventContext.freeSocketEvents = std::addressof(socketEvent);
       }
-      return eventContext;
+
+      init_curl_context(eventContext);
+   }
+
+   static void free_curl_context(event_context &eventContext)
+   {
+      auto *multiHandle = eventContext.multiHandle;
+      eventContext.multiHandle = nullptr;
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(multiHandle, CURLMOPT_SOCKETDATA, nullptr));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(multiHandle, CURLMOPT_SOCKETFUNCTION, nullptr));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(multiHandle, CURLMOPT_TIMERDATA, nullptr));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_setopt(multiHandle, CURLMOPT_TIMERFUNCTION, nullptr));
+      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_cleanup(multiHandle));
    }
 
    static void free_event_context(event_context &eventContext)
    {
+      free_curl_context(eventContext);
+
+      evtimer_del(std::addressof(eventContext.eventTimer));
 #if (not defined(NDEBUG))
       size_t socketEventsCount = 0;
 #endif
@@ -757,9 +801,22 @@ private:
 #endif
       }
       assert(eventContext.allSocketEvents.size() == socketEventsCount);
-      EXPECT_ERROR_CODE(CURLM_OK, curl_multi_cleanup(eventContext.multiHandle));
-      eventContext.multiHandle = nullptr;
       event_base_free(std::addressof(eventContext.eventBase));
+   }
+
+   static void handle_events(event_context &eventContext)
+   {
+      [[maybe_unused]] auto const eventBaseLoopRetCode = event_base_loop(std::addressof(eventContext.eventBase), EVLOOP_NONBLOCK);
+      assert(0 <= eventBaseLoopRetCode);
+   }
+
+   static void handle_timer_queue(event_context &eventContext)
+   {
+      connection *timedoutConnection = nullptr;
+      while (nullptr != (timedoutConnection = eventContext.timerQueue.pop(std::chrono::system_clock::now())))
+      {
+         timedoutConnection->tick(eventContext);
+      }
    }
 };
 
