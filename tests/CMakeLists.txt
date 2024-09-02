@@ -23,36 +23,26 @@
    SOFTWARE.
 ]]
 
-include("${WEBTHREAD_PROJECT_SOURCE_DIR}/thirdparty/boost.cmake")
-include("${WEBTHREAD_PROJECT_SOURCE_DIR}/thirdparty/boost.wintls.cmake")
-include("${WEBTHREAD_PROJECT_SOURCE_DIR}/thirdparty/CMakeSanitizer.cmake")
-include("${WEBTHREAD_PROJECT_SOURCE_DIR}/thirdparty/googletest.cmake")
-
 file(GLOB_RECURSE WEBTHREAD_TESTS_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp")
 file(GLOB_RECURSE WEBTHREAD_TESTS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
-set(
-   WEBTHREAD_TESTS_THIRDPARTY
-   "${WEBTHREAD_PROJECT_SOURCE_DIR}/thirdparty/boost.cmake"
-   "${WEBTHREAD_PROJECT_SOURCE_DIR}/thirdparty/boost.wintls.cmake"
-   "${WEBTHREAD_PROJECT_SOURCE_DIR}/thirdparty/CMakeCodeCov.cmake"
-   "${WEBTHREAD_PROJECT_SOURCE_DIR}/thirdparty/CMakeSanitizer.cmake"
-   "${WEBTHREAD_PROJECT_SOURCE_DIR}/thirdparty/CMakeTargets.cmake"
-   "${WEBTHREAD_PROJECT_SOURCE_DIR}/thirdparty/googletest.cmake"
-)
-add_executable(tests ${WEBTHREAD_TESTS_HEADERS} ${WEBTHREAD_TESTS_SOURCES} ${WEBTHREAD_TESTS_THIRDPARTY})
+add_executable(tests ${WEBTHREAD_TESTS_HEADERS} ${WEBTHREAD_TESTS_SOURCES})
 add_executable(webthread::tests ALIAS tests)
 set_target_properties(tests PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/" FILES ${WEBTHREAD_TESTS_HEADERS} ${WEBTHREAD_TESTS_SOURCES})
-source_group(TREE "${WEBTHREAD_PROJECT_SOURCE_DIR}/" FILES ${WEBTHREAD_TESTS_THIRDPARTY})
-target_compile_definitions(tests PUBLIC $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00 WINVER=0x0A00 NOMINMAX>)
+target_compile_definitions(tests PRIVATE $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00 WINVER=0x0A00 NOMINMAX>)
 if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-   target_compile_options(webthread PUBLIC /bigobj)
+   # Enable Language Extensions (windows headers does not compile without)
+   set_target_properties(tests PROPERTIES CXX_EXTENSIONS ON)
+   target_compile_options(tests PRIVATE /bigobj)
 endif()
+set_target_default_cxx_compile_flags(tests PRIVATE)
 target_include_directories(tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(tests PRIVATE Boost::beast CURL::libcurl gmock_main webthread $<$<PLATFORM_ID:Windows>:Boost::wintls>)
 if(OPENSSL_FOUND)
    target_include_directories(tests PRIVATE "${OPENSSL_INCLUDE_DIR}")
    target_link_libraries(tests PRIVATE ${OPENSSL_LIBRARIES})
+endif()
+if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
 endif()
 available_cxx_sanitizers(CXX_SANITIZERS)
 list(LENGTH CXX_SANITIZERS CXX_SANITIZERS_LENGTH)

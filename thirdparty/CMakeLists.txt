@@ -23,16 +23,18 @@
    SOFTWARE.
 ]]
 
-include(FetchContent)
+add_subdirectory(CMakeTargets EXCLUDE_FROM_ALL)
 
-FetchContent_Declare(
-   CMakeTargets
-   # Download Step Options
-   GIT_PROGRESS ON
-   GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
-   GIT_REPOSITORY https://github.com/cpp4ever/CMakeTargets.git
-   GIT_SHALLOW ON
-   GIT_SUBMODULES_RECURSE ON
-   GIT_TAG v2024.08.10
-)
-FetchContent_MakeAvailable(CMakeTargets)
+include(c-ares.cmake)
+include(curl.cmake)
+include(libevent.cmake)
+
+if(WEBTHREAD_DEV)
+   include(boost.cmake)
+   include(boost.wintls.cmake)
+   include(CMakeCodeCov.cmake)
+   include(CMakeSanitizer.cmake)
+   include(googletest.cmake)
+endif()
+
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} PARENT_SCOPE)

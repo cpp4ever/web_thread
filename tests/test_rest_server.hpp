@@ -85,7 +85,7 @@ private:
 
 #define EXPECT_HTTP_REQUEST(testRequest, testMethod, testTarget, testHeaders, testBody)   \
 {                                                                                         \
-   EXPECT_EQ((testRequest).version(), 11);                                                \
+   EXPECT_EQ((testRequest).version(), 11U);                                               \
    EXPECT_EQ((testRequest).method(), (testMethod));                                       \
    EXPECT_EQ(std::string_view{(testRequest).target()}, (testTarget));                     \
    for (auto const &testHeader : (testRequest))                                           \

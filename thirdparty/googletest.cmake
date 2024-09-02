@@ -41,4 +41,8 @@ FetchContent_Declare(
    GIT_TAG v1.15.2
 )
 FetchContent_MakeAvailable(googletest)
+if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+   # Enable Language Extensions
+   set_target_properties(gmock_main PROPERTIES CXX_EXTENSIONS ON)
+endif()
 organize_thirdparty_directory_targets("${googletest_SOURCE_DIR}" thirdparty)

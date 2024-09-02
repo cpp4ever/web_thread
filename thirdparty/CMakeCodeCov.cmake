@@ -30,7 +30,7 @@ FetchContent_Declare(
    # Download Step Options
    GIT_PROGRESS ON
    GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
-   GIT_REPOSITORY https://github.com/cpp4ever/CMake-codecov.git
+   GIT_REPOSITORY https://github.com/RWTH-HPC/CMake-codecov.git
    GIT_SHALLOW ON
    GIT_SUBMODULES_RECURSE ON
    GIT_TAG master

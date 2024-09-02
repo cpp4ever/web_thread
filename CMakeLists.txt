@@ -25,6 +25,12 @@
 
 cmake_minimum_required(VERSION 3.20)
 
+get_filename_component(WEBTHREAD_PROJECT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR} REALPATH)
+get_filename_component(MAIN_PROJECT_SOURCE_DIR ${CMAKE_SOURCE_DIR} REALPATH)
+if(WEBTHREAD_PROJECT_SOURCE_DIR STREQUAL MAIN_PROJECT_SOURCE_DIR)
+   set(WEBTHREAD_DEV TRUE)
+endif()
+
 project(webthread LANGUAGES C CXX)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -33,22 +39,19 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 find_package(OpenSSL QUIET)
 
-include("${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/CMakeTargets.cmake")
-include("${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/c-ares.cmake")
-include("${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/curl.cmake")
-include("${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/libevent.cmake")
+add_subdirectory(thirdparty EXCLUDE_FROM_ALL)
+include(CMakeTargetCompiler)
 
 file(GLOB_RECURSE WEBTHREAD_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp")
 file(GLOB_RECURSE WEBTHREAD_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
-set(
-   WEBTHREAD_THIRDPARTY
-   "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/c-ares.cmake"
-   "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/CMakeTargets.cmake"
-   "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/curl.cmake"
-   "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/libevent.cmake"
-)
+file(GLOB WEBTHREAD_THIRDPARTY "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/*.cmake" "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/CMakeLists.txt")
 add_library(webthread STATIC ${WEBTHREAD_HEADERS} ${WEBTHREAD_SOURCES} ${WEBTHREAD_THIRDPARTY})
 add_library(webthread::webthread ALIAS webthread)
+if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+   # Enable Language Extensions (windows headers does not compile without)
+   set_target_properties(webthread PROPERTIES CXX_EXTENSIONS ON)
+endif()
+set_target_default_cxx_compile_flags(webthread PRIVATE)
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/include/webthread/" PREFIX "include" FILES ${WEBTHREAD_HEADERS})
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src/" PREFIX "src" FILES ${WEBTHREAD_SOURCES})
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/" FILES ${WEBTHREAD_THIRDPARTY})
@@ -65,17 +68,13 @@ elseif(OPENSSL_FOUND)
    endif()
 endif()
 target_include_directories(webthread PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include/")
-target_link_libraries(webthread PRIVATE CURL::libcurl event)
+target_link_libraries(webthread PRIVATE CURL::libcurl event_core)
 
-get_filename_component(WEBTHREAD_PROJECT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR} REALPATH)
-get_filename_component(MAIN_PROJECT_SOURCE_DIR ${CMAKE_SOURCE_DIR} REALPATH)
-if(WEBTHREAD_PROJECT_SOURCE_DIR STREQUAL MAIN_PROJECT_SOURCE_DIR)
-   include("${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/CMakeCodeCov.cmake")
-
+if(WEBTHREAD_DEV)
    if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
       target_compile_options(webthread PUBLIC /W4)
    else()
-      target_compile_options(webthread PUBLIC -Wall -Wextra -Wpedantic)
+      target_compile_options(webthread PUBLIC -Wall -Werror -Wextra -Wpedantic)
    endif()
    enable_testing()
    add_subdirectory(tests)

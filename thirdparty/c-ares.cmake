@@ -42,9 +42,13 @@ FetchContent_Declare(
    GIT_REPOSITORY https://github.com/c-ares/c-ares.git
    GIT_SHALLOW ON
    GIT_SUBMODULES_RECURSE ON
-   GIT_TAG v1.32.3
+   GIT_TAG v1.33.1
 )
 FetchContent_MakeAvailable(c_ares)
 set(CARES_INCLUDE_DIR "${c_ares_SOURCE_DIR}/include/")
 set(CARES_LIBRARY ${CARES_LIBRARIES})
+if(CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+   # Enable Language Extensions (windows headers does not compile without)
+   set_target_properties(c-ares PROPERTIES C_EXTENSIONS ON)
+endif()
 organize_thirdparty_directory_targets("${c_ares_SOURCE_DIR}" thirdparty)

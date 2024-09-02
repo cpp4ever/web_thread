@@ -29,9 +29,15 @@ include(FetchContent)
 FetchContent_Declare(
    boost
    # Download Step Options
-   URL https://github.com/boostorg/boost/releases/download/boost-1.85.0/boost-1.85.0-cmake.tar.xz
-   URL_HASH SHA3_256=d63606eefbf5a34e764ee8b9a7ee7ad00ea291bd6eed67365543ae57413b1932
+   URL https://github.com/boostorg/boost/releases/download/boost-1.86.0/boost-1.86.0-cmake.tar.xz
+   URL_HASH SHA3_256=bc535064f8d7dd9310c61497e0d461553e1dfba6fb2fbe29f0b25e6b9452e97f
    DOWNLOAD_EXTRACT_TIMESTAMP ON
 )
 FetchContent_MakeAvailable(boost)
+if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+   # Enable Language Extensions
+   set_target_properties(boost_container PROPERTIES CXX_EXTENSIONS ON)
+   set_target_properties(boost_context PROPERTIES CXX_EXTENSIONS ON)
+   set_target_properties(boost_coroutine PROPERTIES CXX_EXTENSIONS ON)
+endif()
 organize_thirdparty_directory_targets("${boost_SOURCE_DIR}" thirdparty)

@@ -49,4 +49,8 @@ FetchContent_Declare(
    GIT_TAG release-2.1.12-stable
 )
 FetchContent_MakeAvailable(libevent)
+if(CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+   # Enable Language Extensions (windows headers does not compile without)
+   set_target_properties(event_core_static PROPERTIES C_EXTENSIONS ON)
+endif()
 organize_thirdparty_directory_targets("${libevent_SOURCE_DIR}" thirdparty)

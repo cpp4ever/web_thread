@@ -56,4 +56,10 @@ FetchContent_Declare(
    GIT_TAG curl-8_9_1
 )
 FetchContent_MakeAvailable(curl)
+if(CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+   # Disable Additional Security Checks
+   set_target_c_compile_flag(libcurl_object PRIVATE /sdl-)
+   # Enable Language Extensions (windows headers does not compile without)
+   set_target_properties(libcurl_object PROPERTIES C_EXTENSIONS ON)
+endif()
 organize_thirdparty_directory_targets("${curl_SOURCE_DIR}" thirdparty)
