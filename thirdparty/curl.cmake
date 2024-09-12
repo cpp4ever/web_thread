@@ -23,6 +23,7 @@
    SOFTWARE.
 ]]
 
+include(CMakeTargetCompiler)
 include(CMakeThirdpartyTargets)
 include(FetchContent)
 

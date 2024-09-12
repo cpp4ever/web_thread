@@ -1,3 +1,4 @@
 [submodule "thirdparty/CMakeTargets"]
-	path = thirdparty/CMakeTargets
-	url = https://github.com/cpp4ever/CMakeTargets.git
+   path = thirdparty/CMakeTargets
+   shallow = true
+   url = https://github.com/cpp4ever/CMakeTargets.git
